@@ -262,10 +262,19 @@ class BlinkStick(object):
     def _refresh_device(self):
         if not hasattr(self, 'bs_serial'):
             return False
+        old = getattr(self, 'device', None)
         d = find_by_serial(self.bs_serial)
         if d:
             self.device = d.device
+            # Drop the previous USB handle. Without this, each USB retry leaks an fd
+            # (seen as thousands of opens on /dev/bus/usb/... until accept() fails).
+            if old is not None and old is not self.device:
+                try:
+                    usb.util.dispose_resources(old)
+                except Exception:
+                    pass
             return True
+        return False
 
     def get_serial(self):
         """
@@ -1598,13 +1607,23 @@ def find_by_serial(serial=None):
         devices = [d for d in _find_blicksticks()
                    if d.serial_number == serial]
     else:
+        matched = None
         for d in _find_blicksticks():
             try:
-                if usb.util.get_string(d, 3, 1033) == serial:
-                    devices = [d]
-                    break
+                same = usb.util.get_string(d, 3, 1033) == serial
             except Exception as e:
                 print("{0}".format(e))
+                same = False
+            if same and matched is None:
+                matched = d
+            else:
+                # Probe/get_string can leave the device open; release non-matches.
+                try:
+                    usb.util.dispose_resources(d)
+                except Exception:
+                    pass
+        if matched is not None:
+            devices = [matched]
 
     if devices:
         return BlinkStick(device=devices[0])
